@@ -74,34 +74,47 @@ def load_pipeline():
     t0 = time.time()
 
     _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.float16 if torch.cuda.is_available() else torch.float32
 
-    print(f"  Device: {_device}, dtype: {dtype}", flush=True)
+    transformer_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    text_encoder_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    vae_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
 
-    # Load pipeline from HuggingFace (weights NOT in image — downloaded on cold start)
-    # SanaPipeline uses DC-AE + Gemma 2 text encoder + linear attention DiT
+    print(
+        f"  Device: {_device}, transformer={transformer_dtype}, "
+        f"text_encoder={text_encoder_dtype}, vae={vae_dtype}",
+        flush=True,
+    )
+
     pipe = SanaPipeline.from_pretrained(
         MODEL_ID,
-        torch_dtype=dtype,
+        torch_dtype=transformer_dtype,
         variant="fp16",
     )
 
-    # Move fully to GPU — cpu_offload causes issues in serverless containers
-  pipe = pipe.to(_device)
+    # Move fully to GPU — cpu_offload causes issues in serverless containers.
+    # Calling .to(device) without a dtype should preserve the component dtypes above.
+    pipe = pipe.to(_device)
   
-  # Avoid black output from fp16 VAE/DC-AE decoding.
-  # Keep the main model fast, but decode the final image in safer precision.
-  try:
-      if hasattr(pipe, "vae") and pipe.vae is not None:
-          pipe.vae.to(dtype=torch.float32)
-          print("[Cold Start] VAE moved to float32 to avoid black image output.", flush=True)
-  except Exception as exc:
-      print(f"[Cold Start] Could not move VAE to float32: {exc}", flush=True)
-  
-  print(f"[Cold Start] Pipeline ready in {time.time() - t0:.1f}s", flush=True)
-  
-  _pipe = pipe
-  return _pipe, _device
+    try:
+        if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+            pipe.text_encoder.to(dtype=text_encoder_dtype)
+            print("[Cold Start] Text encoder moved to bfloat16.", flush=True)
+    except Exception as exc:
+        print(f"[Cold Start] Could not move text encoder to bfloat16: {exc}", flush=True)
+
+    try:
+        if hasattr(pipe, "vae") and pipe.vae is not None:
+            pipe.vae.to(dtype=vae_dtype)
+            print("[Cold Start] VAE moved to bfloat16 to avoid fp16 black output.", flush=True)
+    except Exception as exc:
+        print(f"[Cold Start] Could not move VAE to bfloat16: {exc}", flush=True)
+
+    
+
+    print(f"[Cold Start] Pipeline ready in {time.time() - t0:.1f}s", flush=True)
+
+    _pipe = pipe
+    return _pipe, _device
 
 
 def image_to_b64(image) -> str:
@@ -227,6 +240,11 @@ def handler(job):
         )
 
         # Encode as base64 PNG
+        try:
+            print(f"[Worker] Image mode={image.mode}, size={image.size}, extrema={image.getextrema()}", flush=True)
+        except Exception as exc:
+            print(f"[Worker] Could not inspect image output: {exc}", flush=True)
+      
         print("[Worker] Encoding image as base64 PNG...", flush=True)
         image_b64 = image_to_b64(image)
 
