@@ -188,7 +188,11 @@ def handler(job):
     guidance_scale = float(job_input.get("guidance_scale", 5.0))
     pag_guidance_scale = float(job_input.get("pag_guidance_scale", 2.0))
     seed_raw = job_input.get("seed", None)
-    seed = int(seed_raw) if seed_raw is not None else None
+
+    if seed_raw is None or seed_raw == "" or str(seed_raw).strip() == "-1":
+        seed = None
+    else:
+        seed = int(seed_raw)
 
     # Validate dimensions (Sana supports 512-4096 in 32px multiples)
     height = max(512, min(4096, height // 32 * 32))
