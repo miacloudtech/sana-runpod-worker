@@ -87,12 +87,21 @@ def load_pipeline():
     )
 
     # Move fully to GPU — cpu_offload causes issues in serverless containers
-    pipe = pipe.to(_device)
-
-    print(f"[Cold Start] Pipeline ready in {time.time() - t0:.1f}s", flush=True)
-
-    _pipe = pipe
-    return _pipe, _device
+  pipe = pipe.to(_device)
+  
+  # Avoid black output from fp16 VAE/DC-AE decoding.
+  # Keep the main model fast, but decode the final image in safer precision.
+  try:
+      if hasattr(pipe, "vae") and pipe.vae is not None:
+          pipe.vae.to(dtype=torch.float32)
+          print("[Cold Start] VAE moved to float32 to avoid black image output.", flush=True)
+  except Exception as exc:
+      print(f"[Cold Start] Could not move VAE to float32: {exc}", flush=True)
+  
+  print(f"[Cold Start] Pipeline ready in {time.time() - t0:.1f}s", flush=True)
+  
+  _pipe = pipe
+  return _pipe, _device
 
 
 def image_to_b64(image) -> str:
@@ -133,30 +142,33 @@ def run_inference(
 
     t_start = time.time()
 
-    # Run inference — use autocast for mixed precision
+    # Run inference.
+    # Do not wrap the entire pipeline in fp16 autocast because that can force
+    # the decoder/VAE path back into fp16 and cause black output.
     with torch.inference_mode():
-        with torch.cuda.amp.autocast(enabled=True):
-            pipe_kwargs = dict(
-                prompt=prompt,
-                negative_prompt=negative_prompt or "",
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                num_images_per_prompt=1,
-                generator=generator,
-                use_resolution_binning=True,
-            )
-            # pag_guidance_scale is only supported by SanaPAGPipeline, not the
-            # base SanaPipeline. Pass it only if the loaded pipeline accepts it.
-            try:
-                import inspect
-
-                if "pag_guidance_scale" in inspect.signature(pipe.__call__).parameters:
-                    pipe_kwargs["pag_guidance_scale"] = pag_guidance_scale
-            except (TypeError, ValueError):
-                pass
-            images = pipe(**pipe_kwargs).images
+        pipe_kwargs = dict(
+            prompt=prompt,
+            negative_prompt=negative_prompt or "",
+            height=height,
+            width=width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            num_images_per_prompt=1,
+            generator=generator,
+            use_resolution_binning=True,
+        )
+    
+        # pag_guidance_scale is only supported by SanaPAGPipeline, not the
+        # base SanaPipeline. Pass it only if the loaded pipeline accepts it.
+        try:
+            import inspect
+    
+            if "pag_guidance_scale" in inspect.signature(pipe.__call__).parameters:
+                pipe_kwargs["pag_guidance_scale"] = pag_guidance_scale
+        except (TypeError, ValueError):
+            pass
+    
+        images = pipe(**pipe_kwargs).images
 
     wall_time = time.time() - t_start
     print(f"[Done] Generation took {wall_time:.1f}s", flush=True)
